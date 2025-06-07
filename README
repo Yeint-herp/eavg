@@ -1,0 +1,53 @@
+EAVG - Entity-Attribute-Value Graph
+====================================
+
+A lightweight in-memory graph database in C.
+
+Concepts
+--------
+- Entity: Identified by ID and type (e.g., "Alice")
+- Attribute: Describes a property (e.g., "age")
+- Value: Associated data (int, double, string, binary, or entity reference)
+- Edge: Directed relation between two entities with optional weight
+
+Features
+--------
+- Fast lookup via open-addressing hashmaps
+- Memory-efficient arenas
+- Typed values (INT, DOUBLE, STRING, BINARY, ENTITY_REF)
+- Named attributes and entities
+- Directed edges with optional metadata (relation type, weight, label)
+- Locking for thread safety (via pthreads)
+
+Example
+-------
+    eavgDB *db = eavgDB_create(128);
+
+    eavgEntity *alice = eavgDB_addEntity(db, 1, "Alice");
+    eavgAttribute *age = eavgDB_addAttribute(db, "age", EAVG_DATA_TYPE_INT);
+    eavgDB_addIntValue(db, alice->id, age->id, 30);
+
+    eavgEntity *bob = eavgDB_addEntity(db, 1, "Bob");
+    eavgRelationType *rel = eavgDB_addRelationType(db, "love");
+    eavgDB_addEdge(db, alice->id, bob->id, rel->id, 1.0);
+
+Build
+-----
+    make
+
+Tests
+-----
+    make -C tests
+    build/debug/test/eavg_tests
+
+Planned Features
+----------------
+- JSON export/import
+- Query language
+- Persistence
+- Edge filters
+
+License
+-------
+MIT License
+
