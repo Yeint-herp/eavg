@@ -21,7 +21,7 @@ jobs:
       - name: Build static lib
         run: make
 
-      - name: Build static lib and tests
+      - name: Build tests
         run: make -C tests
 
       - name: Run tests
