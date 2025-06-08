@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdio.h>
+
+#define EAVG_PERS_MAGIC  "EAVGPERS"
+#define EAVG_PERS_VERSION 1
 
 static char *strdup_arena(Arena *a, const char *s) {
     if (!s) return NULL;
@@ -648,3 +652,352 @@ eavgEdgeRec *eavgDB_getFilteredEdges(
     return results;
 }
 
+static int write_all(FILE *f, const void *buf, size_t sz) {
+    return fwrite(buf, 1, sz, f) == sz ? 0 : -1;
+}
+static int read_all(FILE *f, void *buf, size_t sz) {
+    return fread(buf, 1, sz, f) == sz ? 0 : -1;
+}
+
+static int write_u32(FILE *f, uint32_t v) {
+    uint32_t le = v;
+    return write_all(f, &le, sizeof le);
+}
+static int write_u64(FILE *f, uint64_t v) {
+    uint64_t le = v;
+    return write_all(f, &le, sizeof le);
+}
+static int read_u32(FILE *f, uint32_t *out) {
+    return read_all(f, out, sizeof *out);
+}
+static int read_u64(FILE *f, uint64_t *out) {
+    return read_all(f, out, sizeof *out);
+}
+
+static int write_cstr(FILE *f, const char *s) {
+    uint32_t len = s ? (uint32_t)strlen(s) : 0;
+    if (write_u32(f, len)) return -1;
+    return len ? write_all(f, s, len) : 0;
+}
+static char *read_cstr(FILE *f, Arena *arena) {
+    uint32_t len;
+    if (read_u32(f, &len)) return NULL;
+    if (len == 0) return NULL;
+    char *buf = arena_alloc(arena, len+1);
+    if (!buf) return NULL;
+    if (read_all(f, buf, len)) { return NULL; }
+    buf[len] = '\0';
+    return buf;
+}
+
+int eavgDB_save(eavgDB *db, const char *filename) {
+    FILE *f = fopen(filename, "wb");
+    if (!f) return -1;
+    
+    if (write_all(f, EAVG_PERS_MAGIC, 8) ||
+        write_u32(f, EAVG_PERS_VERSION)) {
+        fclose(f);
+        return -1;
+    }
+
+    LOCK_RD(db);
+    
+    size_t ecount = 0;
+    for (size_t i = 0; i < db->entitiesById->capacity; i++) {
+        if (db->entitiesById->values[i]) ++ecount;
+    }
+    if (write_u64(f, ecount)) goto fail;
+    for (size_t i = 0; i < db->entitiesById->capacity; i++) {
+        eavgEntity *e = (eavgEntity*)db->entitiesById->values[i];
+        if (!e) continue;
+        write_u64(f, e->id);
+        write_u32(f, e->typeId);
+        write_cstr(f, e->name);
+    }
+
+    size_t acount = 0;
+    for (size_t i = 0; i < db->attributesById->capacity; i++) {
+        if (db->attributesById->values[i]) ++acount;
+    }
+    write_u64(f, acount);
+    for (size_t i = 0; i < db->attributesById->capacity; i++) {
+        eavgAttribute *a = (eavgAttribute*)db->attributesById->values[i];
+        if (!a) continue;
+        write_u64(f, a->id);
+        write_u32(f, a->dataType);
+        write_cstr(f, a->name);
+    }
+
+    size_t rcount = 0;
+    for (size_t i = 0; i < db->relationTypesById->capacity; i++) {
+        if (db->relationTypesById->values[i]) ++rcount;
+    }
+    write_u64(f, rcount);
+    for (size_t i = 0; i < db->relationTypesById->capacity; i++) {
+        eavgRelationType *r = (eavgRelationType*)db->relationTypesById->values[i];
+        if (!r) continue;
+        write_u64(f, r->id);
+        write_cstr(f, r->name);
+    }
+
+    size_t vcount = 0;
+    for (size_t i = 0; i < db->valuesByEntity->capacity; i++) {
+        eavgValueList *vl = (eavgValueList*)db->valuesByEntity->values[i];
+        if (!vl) continue;
+        vcount += vl->count;
+    }
+    write_u64(f, vcount);
+    for (size_t i = 0; i < db->valuesByEntity->capacity; i++) {
+        eavgValueList *vl = (eavgValueList*)db->valuesByEntity->values[i];
+        if (!vl) continue;
+        for (size_t j = 0; j < vl->count; j++) {
+            eavgValRec *r = &vl->values[j];
+            write_u64(f, r->id);
+            write_u64(f, vl->entityId);
+            write_u64(f, r->attributeId);
+            
+            eavgAttribute *at = u64_map_get(db->attributesById, r->attributeId);
+            write_u32(f, at->dataType);
+            switch (at->dataType) {
+            case EAVG_DATA_TYPE_INT:
+                write_all(f, &r->data.intValue, sizeof r->data.intValue);
+                break;
+            case EAVG_DATA_TYPE_DOUBLE:
+                write_all(f, &r->data.doubleValue, sizeof r->data.doubleValue);
+                break;
+            case EAVG_DATA_TYPE_STRING:
+                write_cstr(f, r->data.stringValue);
+                break;
+            case EAVG_DATA_TYPE_ENTITY:
+                write_u64(f, r->data.entityRef);
+                break;
+            default:
+                /* skip unsupported types */
+                break;
+            }
+        }
+    }
+
+    size_t edgeCount = 0;
+    for (size_t i = 0; i < db->adjIndexBySource->capacity; i++) {
+        eavgAdjList *al = (eavgAdjList*)db->adjIndexBySource->values[i];
+        if (al) edgeCount += al->count;
+    }
+    write_u64(f, edgeCount);
+    for (size_t i = 0; i < db->adjIndexBySource->capacity; i++) {
+        eavgAdjList *al = (eavgAdjList*)db->adjIndexBySource->values[i];
+        if (!al) continue;
+        for (size_t j = 0; j < al->count; j++) {
+            eavgEdgeRec *e = &al->edges[j];
+            write_u64(f, e->id);
+            write_u64(f, al->srcId);
+            write_u64(f, e->targetEntity);
+            write_u64(f, e->relationTypeId);
+            write_all(f, &e->weight, sizeof e->weight);
+            write_u32(f, (uint32_t)e->direction);
+            write_u64(f, e->timestamp);
+            write_cstr(f, e->label);
+        }
+    }
+
+    UNLOCK_RD(db);
+    fclose(f);
+    return 0;
+
+ fail:
+    UNLOCK_RD(db);
+    fclose(f);
+    return -1;
+}
+
+eavgDB *eavgDB_load(const char *filename) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) return NULL;
+
+    char magic[8];
+    if (read_all(f, magic, 8) != 0 ||
+        memcmp(magic, EAVG_PERS_MAGIC, 8) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    uint32_t version;
+    if (read_u32(f, &version) != 0 || version != EAVG_PERS_VERSION) {
+        fclose(f);
+        return NULL;
+    }
+
+    eavgDB *db = eavgDB_create(128);
+    if (!db) {
+        fclose(f);
+        return NULL;
+    }
+
+    LOCK_WR(db);
+
+    uint64_t ecount;
+    if (read_u64(f, &ecount) != 0) goto fail;
+    for (uint64_t i = 0; i < ecount; i++) {
+        uint64_t id;
+        uint32_t typeId;
+        char *name;
+        if (read_u64(f, &id) != 0 ||
+            read_u32(f, &typeId) != 0) goto fail;
+        name = read_cstr(f, &db->entityArena);
+        eavgEntity *e = EAVG_ENTITY_ALLOC(db);
+        e->id     = id;
+        e->typeId = typeId;
+        e->name   = name;
+        u64_map_put(db->entitiesById, id, e);
+        if (name) str_map_put(db->entitiesByName, name, e);
+        if (id >= db->nextEntityId) db->nextEntityId = id + 1;
+    }
+
+    uint64_t acount;
+    if (read_u64(f, &acount) != 0) goto fail;
+    for (uint64_t i = 0; i < acount; i++) {
+        uint64_t id;
+        uint32_t dataType;
+        char *name;
+        if (read_u64(f, &id) != 0 ||
+            read_u32(f, &dataType) != 0) goto fail;
+        name = read_cstr(f, &db->attributeArena);
+        eavgAttribute *a = EAVG_ATTR_ALLOC(db);
+        a->id            = id;
+        a->dataType      = dataType;
+        a->name          = name;
+        a->onValueAdded  = NULL;
+        a->userData      = NULL;
+        u64_map_put(db->attributesById, id, a);
+        if (name) str_map_put(db->attributesByName, name, a);
+        if (id >= db->nextAttributeId) db->nextAttributeId = id + 1;
+    }
+
+    uint64_t rcount;
+    if (read_u64(f, &rcount) != 0) goto fail;
+    for (uint64_t i = 0; i < rcount; i++) {
+        uint64_t id;
+        char *name;
+        if (read_u64(f, &id) != 0) goto fail;
+        name = read_cstr(f, &db->attributeArena);
+        eavgRelationType *rt = EAVG_RELTYPE_ALLOC(db);
+        rt->id   = id;
+        rt->name = name;
+        u64_map_put(db->relationTypesById, id, rt);
+        if (name) str_map_put(db->relationTypesByName, name, rt);
+        if (id >= db->nextRelationTypeId) db->nextRelationTypeId = id + 1;
+    }
+
+    uint64_t vcount;
+    if (read_u64(f, &vcount) != 0) goto fail;
+    for (uint64_t i = 0; i < vcount; i++) {
+        uint64_t recId, entityId, attributeId;
+        uint32_t dtype;
+        if (read_u64(f, &recId)     != 0 ||
+            read_u64(f, &entityId)  != 0 ||
+            read_u64(f, &attributeId) != 0 ||
+            read_u32(f, &dtype)     != 0) goto fail;
+            
+        eavgValueList *vl = u64_map_get(db->valuesByEntity, entityId);
+        if (!vl) {
+            vl = arena_alloc(&db->valueArena, sizeof *vl);
+            vl->entityId = entityId;
+            vl->values   = NULL;
+            vl->count    = vl->cap = 0;
+            u64_map_put(db->valuesByEntity, entityId, vl);
+        }
+        if (vl->count == vl->cap) {
+            size_t newCap = vl->cap ? vl->cap * 2 : 4;
+            vl->values    = arena_alloc(&db->valueArena,
+                                        newCap * sizeof *vl->values);
+            vl->cap       = newCap;
+        }
+        eavgValRec *r = &vl->values[vl->count++];
+        r->id          = recId;
+        r->attributeId = attributeId;
+        
+        switch (dtype) {
+          case EAVG_DATA_TYPE_INT:
+            read_all(f, &r->data.intValue, sizeof r->data.intValue);
+            break;
+          case EAVG_DATA_TYPE_DOUBLE:
+            read_all(f, &r->data.doubleValue, sizeof r->data.doubleValue);
+            break;
+          case EAVG_DATA_TYPE_STRING:
+            r->data.stringValue = read_cstr(f, &db->valueArena);
+            break;
+          case EAVG_DATA_TYPE_ENTITY:
+            read_u64(f, &r->data.entityRef);
+            break;
+          default:
+            /* skip unknown */
+            break;
+        }
+        if (recId >= db->nextValueId) db->nextValueId = recId + 1;
+    }
+
+    uint64_t edgeCount;
+    if (read_u64(f, &edgeCount) != 0) goto fail;
+    for (uint64_t i = 0; i < edgeCount; i++) {
+        uint64_t edgeId, srcId, tgtId, relTypeId, ts;
+        double   weight;
+        uint32_t dir;
+        char    *label;
+        if (read_u64(f, &edgeId)     != 0 ||
+            read_u64(f, &srcId)      != 0 ||
+            read_u64(f, &tgtId)      != 0 ||
+            read_u64(f, &relTypeId)  != 0 ||
+            read_all(f, &weight, sizeof weight) != 0 ||
+            read_u32(f, &dir)        != 0 ||
+            read_u64(f, &ts)         != 0) goto fail;
+        label = read_cstr(f, &db->edgeArena);
+
+        eavgAdjList *fwd = u64_map_get(db->adjIndexBySource, srcId);
+        if (!fwd) {
+            fwd       = EAVG_ADJLIST_ALLOC(db);
+            fwd->srcId = srcId;
+            fwd->edges = NULL;
+            fwd->count = fwd->cap = 0;
+            u64_map_put(db->adjIndexBySource, srcId, fwd);
+        }
+        if (fwd->count == fwd->cap) {
+            size_t nc = fwd->cap ? fwd->cap*2 : 4;
+            fwd->edges = arena_alloc(&db->edgeArena, nc * sizeof *fwd->edges);
+            fwd->cap   = nc;
+        }
+        eavgEdgeRec *e = &fwd->edges[fwd->count++];
+        e->id             = edgeId;
+        e->relationTypeId = relTypeId;
+        e->targetEntity   = tgtId;
+        e->weight         = weight;
+        e->direction      = (eavgEdgeDir)dir;
+        e->timestamp      = ts;
+        e->label          = label;
+
+        eavgAdjList *rev = u64_map_get(db->reverseAdjIndexByTarget, tgtId);
+        if (!rev) {
+            rev       = EAVG_ADJLIST_ALLOC(db);
+            rev->srcId = tgtId;
+            rev->edges = NULL;
+            rev->count = rev->cap = 0;
+            u64_map_put(db->reverseAdjIndexByTarget, tgtId, rev);
+        }
+        if (rev->count == rev->cap) {
+            size_t nc = rev->cap ? rev->cap*2 : 4;
+            rev->edges = arena_alloc(&db->edgeArena, nc * sizeof *rev->edges);
+            rev->cap   = nc;
+        }
+        rev->edges[rev->count++] = *e;
+
+        if (edgeId >= db->nextEdgeId) db->nextEdgeId = edgeId + 1;
+    }
+
+    UNLOCK_WR(db);
+    fclose(f);
+    return db;
+
+fail:
+    UNLOCK_WR(db);
+    fclose(f);
+    eavgDB_destroy(db);
+    return NULL;
+}

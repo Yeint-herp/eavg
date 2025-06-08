@@ -142,6 +142,9 @@ typedef bool (*eavgEdgeFilter)(const eavgEdgeRec *e, void *userData);
 Owns eavgDB *eavgDB_create(size_t initial_capacity);
 void    eavgDB_destroy(Owns eavgDB *db);
 
+int eavgDB_save(eavgDB *db, const char *filename);
+Owns eavgDB *eavgDB_load(const char *filename);
+
 eavgEdgeRec *eavgDB_getFilteredEdges(
     eavgDB *db,
     eavg_u64 entityId,
