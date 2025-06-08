@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <assert.h>
+#include <stdbool.h>
 #include <pthread.h>
 
 #include "hashmap.h"
@@ -20,12 +21,8 @@
   #define EAVG_ASSERT(expr) ((void)0)
 #endif
 
-typedef unsigned long  eavg_u64;
-typedef unsigned int   eavg_u32;
-
-#define STATIC_ASSERT(cond,msg) typedef char static_assertion_##msg[(cond)?1:-1]
-STATIC_ASSERT(sizeof(eavg_u64)==8, must_be_8_bytes);
-STATIC_ASSERT(sizeof(eavg_u32)==4, must_be_4_bytes);
+typedef uint64_t  eavg_u64;
+typedef uint32_t   eavg_u32;
 
 #define EAVG_DATA_TYPE_INT      1
 #define EAVG_DATA_TYPE_DOUBLE   2
@@ -140,8 +137,18 @@ typedef struct eavgDB {
     pthread_rwlock_t lock;
 } eavgDB;
 
+typedef bool (*eavgEdgeFilter)(const eavgEdgeRec *e, void *userData);
+
 Owns eavgDB *eavgDB_create(size_t initial_capacity);
 void    eavgDB_destroy(Owns eavgDB *db);
+
+eavgEdgeRec *eavgDB_getFilteredEdges(
+    eavgDB *db,
+    eavg_u64 entityId,
+    eavgEdgeDir dir,
+    eavgEdgeFilter filter,
+    void *userData,
+    size_t *outCount);
 
 Owns eavgEntity *eavgDB_addEntity(        eavgDB*, eavg_u32 typeId, const char* name);
 Borrows LT_db eavgEntity *eavgDB_findEntityById(    eavgDB*, eavg_u64 id);

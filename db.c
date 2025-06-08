@@ -419,6 +419,42 @@ int eavgDB_removeValue(eavgDB *db, eavg_u64 id) {
     return -1;
 }
 
+int
+eavgDB_removeEntity(eavgDB *db, eavg_u64 entityId)
+{
+    LOCK_WR(db);
+    eavgEntity *e = u64_map_get(db->entitiesById, entityId);
+    if (!e) {
+        UNLOCK_WR(db);
+        return -1;
+    }
+
+    u64_map_remove(db->valuesByEntity, entityId);
+
+    u64_map_remove(db->adjIndexBySource, entityId);
+    u64_map_remove(db->reverseAdjIndexByTarget, entityId);
+
+    for (size_t i = 0; i < db->adjIndexBySource->capacity; i++) {
+        eavgAdjList *al = (eavgAdjList*)db->adjIndexBySource->values[i];
+        if (!al) continue;
+        size_t w = 0;
+        for (size_t j = 0; j < al->count; j++) {
+            if (al->edges[j].targetEntity != entityId) {
+                al->edges[w++] = al->edges[j];
+            }
+        }
+        al->count = w;
+    }
+
+    u64_map_remove(db->entitiesById, entityId);
+    if (e->name) {
+        str_map_remove(db->entitiesByName, e->name);
+    }
+
+    UNLOCK_WR(db);
+    return 0;
+}
+
 int eavgDB_removeEdge(eavgDB *db, eavg_u64 id) {
     int removed = 0;
     LOCK_WR(db);
@@ -555,3 +591,60 @@ eavgEntity **eavgDB_findEntitiesByType(eavgDB *db,
     *outCount = cnt;
     return results;
 }
+
+eavgEdgeRec *eavgDB_getFilteredEdges(
+    eavgDB *db,
+    eavg_u64 entityId,
+    eavgEdgeDir dir,
+    eavgEdgeFilter filter,
+    void *userData,
+    size_t *outCount)
+{
+    LOCK_RD(db);
+
+    eavgAdjList *fwd = NULL, *rev = NULL;
+    if (dir & EAVG_EDGE_DIR_OUT) {
+        fwd = u64_map_get(db->adjIndexBySource, entityId);
+    }
+    if (dir & EAVG_EDGE_DIR_IN) {
+        rev = u64_map_get(db->reverseAdjIndexByTarget, entityId);
+    }
+
+    eavgEdgeRec *results = NULL;
+    size_t       count   = 0;
+
+    #define TRY_APPEND(edge_ptr)                                       \
+        do {                                                           \
+            if (!filter || filter(edge_ptr, userData)) {              \
+                eavgEdgeRec *tmp =                                     \
+                  realloc(results, (count + 1) * sizeof *results);    \
+                if (!tmp) {                                            \
+                    free(results);                                     \
+                    UNLOCK_RD(db);                                     \
+                    *outCount = 0;                                     \
+                    return NULL;                                       \
+                }                                                      \
+                results = tmp;                                         \
+                results[count++] = *(edge_ptr);                       \
+            }                                                          \
+        } while (0)
+
+    if (fwd) {
+        for (size_t i = 0; i < fwd->count; i++) {
+            TRY_APPEND(&fwd->edges[i]);
+        }
+    }
+    if (rev) {
+        for (size_t i = 0; i < rev->count; i++) {
+            TRY_APPEND(&rev->edges[i]);
+        }
+    }
+
+    #undef TRY_APPEND
+
+    UNLOCK_RD(db);
+
+    *outCount = count;
+    return results;
+}
+
